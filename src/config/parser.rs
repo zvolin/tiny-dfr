@@ -44,7 +44,7 @@ pub fn button_from_config(cfg: ButtonConfig, default_font: &Option<String>) -> B
         active: false,
         font_size: cfg.font_size.unwrap_or(24.0),
         font_family: cfg.font.or_else(|| default_font.clone()).unwrap_or_default(),
-        style: parse_font_style(&cfg.style),
+        style: parse_font_style(&cfg.font_style),
         foreground: cfg.foreground
             .and_then(|c| parse_hex_color(&c))
             .unwrap_or(Color32::WHITE),
