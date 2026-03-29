@@ -3,6 +3,8 @@
 use egui::Color32;
 use input_linux::Key;
 
+use super::Dimension;
+
 /// Font style flags
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontStyle {
@@ -33,6 +35,16 @@ pub struct Button {
     pub background_active: Color32,
     /// Corner radius for rounded rectangle
     pub corner_radius: f32,
+    /// Button width (pixels or percentage)
+    pub width: Dimension,
+    /// Button height (pixels or percentage)
+    pub height: Dimension,
+    /// Margin around button in pixels
+    pub margin: f32,
+    /// Border width in pixels
+    pub border_width: f32,
+    /// Border color
+    pub border_color: Color32,
 }
 
 impl Default for Button {
@@ -48,6 +60,11 @@ impl Default for Button {
             background: Color32::from_gray(51),
             background_active: Color32::from_gray(102),
             corner_radius: 8.0,
+            width: Dimension::default(),      // auto-distribute
+            height: Dimension::Percent(0.7),  // 70% of bar height
+            margin: 8.0,
+            border_width: 0.0,
+            border_color: Color32::TRANSPARENT,
         }
     }
 }

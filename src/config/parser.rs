@@ -55,6 +55,7 @@ pub fn button_from_config(cfg: ButtonConfig, default_font: &Option<String>) -> B
             .and_then(|c| parse_hex_color(&c))
             .unwrap_or(Color32::from_gray(102)),
         corner_radius: cfg.corner_radius.unwrap_or(8.0),
+        ..Default::default()
     }
 }
 
