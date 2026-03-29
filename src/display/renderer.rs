@@ -126,11 +126,10 @@ pub fn render_function_layer(
             let usable_width = available_width - pixel_shift_width;
             let button_rects = calculate_button_layout(buttons, usable_width, available_height);
 
-            // Check for overflow
+            // Check for overflow (with small epsilon for floating point tolerance)
             let total_width: f32 = button_rects.iter().map(|(_, w, _, m)| w + m * 2.0).sum();
-            if total_width > usable_width {
+            if total_width > usable_width + 0.5 {
                 eprintln!("Warning: buttons overflow available width ({} > {})", total_width, usable_width);
-                return; // Render black bar
             }
 
             let start_x = (pixel_shift_width / 2.0) + pixel_shift.0 as f32;
