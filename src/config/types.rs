@@ -1,5 +1,7 @@
 //! Configuration type definitions
 
+use std::collections::HashMap;
+
 use input_linux::Key;
 use serde::Deserialize;
 
@@ -23,6 +25,7 @@ pub struct ButtonStyleConfig {
 /// Global configuration
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub styles: HashMap<String, ButtonStyleConfig>,
     pub show_button_outlines: bool,
     pub enable_pixel_shift: bool,
     pub adaptive_brightness: bool,
@@ -32,6 +35,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            styles: HashMap::new(),
             show_button_outlines: true,
             enable_pixel_shift: true,
             adaptive_brightness: true,
@@ -71,5 +75,5 @@ pub(crate) struct ConfigProxy {
     pub active_brightness: Option<u32>,
     pub primary_layer_keys: Option<Vec<ButtonConfig>>,
     pub media_layer_keys: Option<Vec<ButtonConfig>>,
-    pub styles: Option<std::collections::HashMap<String, ButtonStyleConfig>>,
+    pub styles: Option<HashMap<String, ButtonStyleConfig>>,
 }

@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use egui::Color32;
 
 use crate::core::{Button, Dimension, FontStyle, FunctionLayer};
-use super::types::{Config, ButtonConfig, ConfigProxy};
+use super::types::{Config, ButtonConfig, ButtonStyleConfig, ConfigProxy};
 
 /// Parse hex color string to Color32
 ///
@@ -54,27 +54,134 @@ pub fn parse_font_style(styles: &Option<Vec<String>>) -> FontStyle {
     result
 }
 
-/// Create Button from ButtonConfig
-pub fn button_from_config(cfg: ButtonConfig, default_font: &Option<String>) -> Button {
-    Button {
-        text: cfg.text.unwrap_or_else(|| "?".to_string()),
-        action: cfg.action,
-        active: false,
-        font_size: cfg.font_size.unwrap_or(24.0),
-        font_family: cfg.font.or_else(|| default_font.clone()).unwrap_or_default(),
-        style: parse_font_style(&cfg.font_style),
-        foreground: cfg.foreground
-            .and_then(|c| parse_hex_color(&c))
-            .unwrap_or(Color32::WHITE),
-        background: cfg.background
-            .and_then(|c| parse_hex_color(&c))
-            .unwrap_or(Color32::from_gray(51)),
-        background_active: cfg.background_active
-            .and_then(|c| parse_hex_color(&c))
-            .unwrap_or(Color32::from_gray(102)),
-        corner_radius: cfg.corner_radius.unwrap_or(8.0),
-        ..Default::default()
+/// Apply style config to button
+fn apply_style_to_button(
+    button: &mut Button,
+    style: &ButtonStyleConfig,
+    default_font: &Option<String>,
+) {
+    if let Some(ref v) = style.width {
+        if let Some(dim) = parse_dimension(v) {
+            button.width = dim;
+        }
     }
+    if let Some(ref v) = style.height {
+        if let Some(dim) = parse_dimension(v) {
+            button.height = dim;
+        }
+    }
+    if let Some(m) = style.margin {
+        button.margin = m;
+    }
+    if let Some(r) = style.border_radius {
+        button.corner_radius = r;
+    }
+    if let Some(w) = style.border_width {
+        button.border_width = w;
+    }
+    if let Some(ref c) = style.border_color {
+        if let Some(color) = parse_hex_color(c) {
+            button.border_color = color;
+        }
+    }
+    if let Some(ref c) = style.background {
+        if let Some(color) = parse_hex_color(c) {
+            button.background = color;
+        }
+    }
+    if let Some(ref c) = style.background_active {
+        if let Some(color) = parse_hex_color(c) {
+            button.background_active = color;
+        }
+    }
+    if let Some(ref c) = style.foreground {
+        if let Some(color) = parse_hex_color(c) {
+            button.foreground = color;
+        }
+    }
+    if let Some(ref f) = style.font.clone().or_else(|| default_font.clone()) {
+        button.font_family = f.clone();
+    }
+    if let Some(size) = style.font_size {
+        button.font_size = size;
+    }
+    if let Some(ref s) = style.font_style {
+        button.style = parse_font_style(&Some(s.clone()));
+    }
+}
+
+/// Create Button from ButtonConfig with style resolution
+pub fn button_from_config(
+    cfg: ButtonConfig,
+    default_font: &Option<String>,
+    styles: &std::collections::HashMap<String, ButtonStyleConfig>,
+) -> Button {
+    // Start with defaults
+    let mut button = Button::default();
+
+    // Apply named style if specified
+    if let Some(style_name) = &cfg.style {
+        if let Some(style) = styles.get(style_name) {
+            apply_style_to_button(&mut button, style, default_font);
+        } else {
+            eprintln!("Warning: unknown style '{}'", style_name);
+        }
+    }
+
+    // Apply inline overrides
+    button.text = cfg.text.unwrap_or_else(|| button.text.clone());
+    button.action = cfg.action;
+
+    if let Some(size) = cfg.font_size {
+        button.font_size = size;
+    }
+    if let Some(font) = cfg.font.or_else(|| default_font.clone()) {
+        button.font_family = font;
+    }
+    if let Some(ref styles) = cfg.font_style {
+        button.style = parse_font_style(&Some(styles.clone()));
+    }
+    if let Some(ref c) = cfg.foreground {
+        if let Some(color) = parse_hex_color(c) {
+            button.foreground = color;
+        }
+    }
+    if let Some(ref c) = cfg.background {
+        if let Some(color) = parse_hex_color(c) {
+            button.background = color;
+        }
+    }
+    if let Some(ref c) = cfg.background_active {
+        if let Some(color) = parse_hex_color(c) {
+            button.background_active = color;
+        }
+    }
+    if let Some(r) = cfg.corner_radius {
+        button.corner_radius = r;
+    }
+    if let Some(ref v) = cfg.width {
+        if let Some(dim) = parse_dimension(v) {
+            button.width = dim;
+        }
+    }
+    if let Some(ref v) = cfg.height {
+        if let Some(dim) = parse_dimension(v) {
+            button.height = dim;
+        }
+    }
+    if let Some(m) = cfg.margin {
+        button.margin = m;
+    }
+    if let Some(w) = cfg.border_width {
+        button.border_width = w;
+    }
+    if let Some(ref c) = cfg.border_color {
+        if let Some(color) = parse_hex_color(c) {
+            button.border_color = color;
+        }
+    }
+
+    button
 }
 
 /// Load configuration from TOML file
@@ -83,19 +190,20 @@ pub fn load_config(path: &str) -> Result<(Config, [FunctionLayer; 2])> {
     let proxy: ConfigProxy = toml::from_str(&content)?;
 
     let default_font = proxy.default_font.clone();
+    let styles = proxy.styles.unwrap_or_default();
 
     let media_buttons: Vec<Button> = proxy
         .media_layer_keys
         .ok_or_else(|| anyhow!("Missing media_layer_keys"))?
         .into_iter()
-        .map(|c| button_from_config(c, &default_font))
+        .map(|c| button_from_config(c, &default_font, &styles))
         .collect();
 
     let primary_buttons: Vec<Button> = proxy
         .primary_layer_keys
         .ok_or_else(|| anyhow!("Missing primary_layer_keys"))?
         .into_iter()
-        .map(|c| button_from_config(c, &default_font))
+        .map(|c| button_from_config(c, &default_font, &styles))
         .collect();
 
     if media_buttons.is_empty() || primary_buttons.is_empty() {
@@ -112,6 +220,7 @@ pub fn load_config(path: &str) -> Result<(Config, [FunctionLayer; 2])> {
     };
 
     let cfg = Config {
+        styles: styles.clone(),
         show_button_outlines: proxy.show_button_outlines.unwrap_or(true),
         enable_pixel_shift: proxy.enable_pixel_shift.unwrap_or(true),
         adaptive_brightness: proxy.adaptive_brightness.unwrap_or(true),
