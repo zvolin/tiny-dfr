@@ -9,9 +9,6 @@ pub const DFR_HEIGHT: i32 = 60;
 /// DRM framebuffer stride
 pub const DFR_STRIDE: i32 = 64;
 
-/// Spacing between buttons in pixels
-pub const BUTTON_SPACING_PX: i32 = 16;
-
 /// Event loop timeout in milliseconds
 pub const TIMEOUT_MS: i32 = 10 * 1000;
 

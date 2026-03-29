@@ -2,7 +2,7 @@
 
 use super::button::Button;
 use super::Dimension;
-use super::state::{DFR_WIDTH, DFR_HEIGHT, BUTTON_SPACING_PX};
+use super::state::{DFR_WIDTH, DFR_HEIGHT};
 use crate::system::PIXEL_SHIFT_WIDTH_PX;
 
 /// A layer of function buttons
@@ -19,21 +19,17 @@ impl FunctionLayer {
 
     /// Check if a touch at (x, y) hits button at index
     pub fn button_hit(&self, btn_idx: usize, x: f64, y: f64) -> bool {
-        let num_buttons = self.buttons.len();
-        if num_buttons == 0 || btn_idx >= num_buttons {
-            return false;
-        }
-
-        let button_width = (DFR_WIDTH - (BUTTON_SPACING_PX * (num_buttons - 1) as i32)) as f64
-            / num_buttons as f64;
-        let left_edge = btn_idx as f64 * (button_width + BUTTON_SPACING_PX as f64);
-
-        if x < left_edge || x > (left_edge + button_width) {
+        if btn_idx >= self.buttons.len() {
             return false;
         }
 
         // Touch must be in middle 80% of height (10% margin top and bottom)
-        y > 0.1 * DFR_HEIGHT as f64 && y < 0.9 * DFR_HEIGHT as f64
+        if y <= 0.1 * DFR_HEIGHT as f64 || y >= 0.9 * DFR_HEIGHT as f64 {
+            return false;
+        }
+
+        // Use button_at to check horizontal position
+        self.button_at(x, y, false) == Some(btn_idx)
     }
 
     /// Get button index at touch position
