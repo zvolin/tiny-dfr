@@ -1,3 +1,5 @@
+//! Backlight management for Touch Bar
+
 use std::{
     fs::{File, OpenOptions, self},
     path::{PathBuf, Path},
@@ -9,7 +11,7 @@ use input::event::{
     Event, switch::{Switch, SwitchEvent, SwitchState},
 };
 use crate::config::Config;
-use crate::TIMEOUT_MS;
+use crate::core::TIMEOUT_MS;
 
 const MAX_DISPLAY_BRIGHTNESS: u32 = 509;
 const MAX_TOUCH_BAR_BRIGHTNESS: u32 = 255;
@@ -19,10 +21,10 @@ const DIMMED_BRIGHTNESS: u32 = 1;
 
 fn read_attr(path: &Path, attr: &str) -> u32 {
     fs::read_to_string(path.join(attr))
-        .expect(&format!("Failed to read {attr}"))
+        .unwrap_or_else(|_| panic!("Failed to read {attr}"))
         .trim()
         .parse::<u32>()
-        .expect(&format!("Failed to parse {attr}"))
+        .unwrap_or_else(|_| panic!("Failed to parse {attr}"))
 }
 
 fn find_backlight() -> Result<PathBuf> {
@@ -48,9 +50,10 @@ fn find_display_backlight() -> Result<PathBuf> {
 }
 
 fn set_backlight(mut file: &File, value: u32) {
-    file.write(format!("{}\n", value).as_bytes()).unwrap();
+    file.write_all(format!("{}\n", value).as_bytes()).unwrap();
 }
 
+/// Manages Touch Bar backlight based on activity and lid state
 pub struct BacklightManager {
     last_active: Instant,
     current_bl: u32,
@@ -60,6 +63,8 @@ pub struct BacklightManager {
 }
 
 impl BacklightManager {
+    /// Create a new backlight manager
+    #[allow(clippy::new_without_default)]
     pub fn new() -> BacklightManager {
         let bl_path = find_backlight().unwrap();
         let display_bl_path = find_display_backlight().unwrap();
@@ -72,32 +77,33 @@ impl BacklightManager {
             display_bl_path
         }
     }
+
     fn display_to_touchbar(display: u32, active_brightness: u32) -> u32 {
         let normalized = display as f64 / MAX_DISPLAY_BRIGHTNESS as f64;
         // Add one so that the touch bar does not turn off
         let adjusted = (normalized.powf(0.5) * active_brightness as f64) as u32 + 1;
         adjusted.min(MAX_TOUCH_BAR_BRIGHTNESS) // Clamp the value to the maximum allowed brightness
     }
+
+    /// Process input event to track activity
     pub fn process_event(&mut self, event: &Event) {
         match event {
             Event::Keyboard(_) | Event::Pointer(_) | Event::Gesture(_) | Event::Touch(_) => {
                 self.last_active = Instant::now();
             },
             Event::Switch(SwitchEvent::Toggle(toggle)) => {
-                match toggle.switch() {
-                    Some(Switch::Lid) => {
-                        self.lid_state = toggle.switch_state();
-                        println!("Lid Switch event: {:?}", self.lid_state);
-                        if toggle.switch_state() == SwitchState::Off {
-                            self.last_active = Instant::now();
-                        }
+                if let Some(Switch::Lid) = toggle.switch() {
+                    self.lid_state = toggle.switch_state();
+                    if toggle.switch_state() == SwitchState::Off {
+                        self.last_active = Instant::now();
                     }
-                    _ => {}
                 }
             }
             _ => {}
         }
     }
+
+    /// Update backlight level based on activity and config
     pub fn update_backlight(&mut self, cfg: &Config) {
         let since_last_active = (Instant::now() - self.last_active).as_millis() as u64;
         let new_bl = if self.lid_state == SwitchState::On {
@@ -118,6 +124,8 @@ impl BacklightManager {
             set_backlight(&self.bl_file, self.current_bl);
         }
     }
+
+    /// Get current backlight level
     pub fn current_bl(&self) -> u32 {
         self.current_bl
     }

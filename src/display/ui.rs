@@ -1,5 +1,8 @@
+//! Error display UI
+
 use egui::{Context, CentralPanel, Frame, Color32, RichText};
 
+/// Render an error message on the Touch Bar
 pub fn render_error(ctx: &Context, message: &str) {
     CentralPanel::default()
         .frame(Frame::none().fill(Color32::from_rgb(80, 0, 0)))

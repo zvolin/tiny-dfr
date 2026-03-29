@@ -1,10 +1,10 @@
-use rand::Rng;
-use std::{
-    time::Instant,
-};
-use crate::TIMEOUT_MS;
+//! Pixel shifting to prevent OLED burn-in
 
-const INTERVAL_MS: i32 = TIMEOUT_MS * 1; // should be a multiple of TIMEOUT_MS
+use rand::Rng;
+use std::time::Instant;
+use crate::core::TIMEOUT_MS;
+
+const INTERVAL_MS: i32 = TIMEOUT_MS; // should be a multiple of TIMEOUT_MS
 const PROLONGED_INTERVAL_MS: i32 = TIMEOUT_MS * 5; // should be a multiple of TIMEOUT_MS and more than INTERVAL_MS
 const ANIMATION_INTERVAL_MS: i32 = 200; // should be less than TIMEOUT_MS
 const ANIMATION_DURATION_MS: i32 = 4000; // should be a multiple of ANIMATION_INTERVAL_MS
@@ -26,6 +26,7 @@ enum ShiftState {
     Normal
 }
 
+/// Manages pixel shifting animation to prevent OLED burn-in
 pub struct PixelShiftManager {
     last_active: Instant,
     y_constant: f64,
@@ -44,6 +45,8 @@ fn wait_for_state(state: ShiftState) -> i32 {
 }
 
 impl PixelShiftManager {
+    /// Create a new pixel shift manager with random initial state
+    #[allow(clippy::new_without_default)]
     pub fn new() -> PixelShiftManager {
         let pixel_progress = rand::thread_rng().gen_range(0..PIXEL_SHIFT_WIDTH_PX);
 
@@ -61,6 +64,7 @@ impl PixelShiftManager {
         }
     }
 
+    /// Update pixel shift state, returns (needs_redraw, next_timeout_ms)
     pub fn update(&mut self) -> (bool, i32) {
         let time_now = Instant::now();
         let since_last_pixel_shift = (time_now - self.last_active).as_millis() as i32;
@@ -95,6 +99,7 @@ impl PixelShiftManager {
         (true, wait_for_state(self.state))
     }
 
+    /// Get current pixel offset (x, y)
     pub fn get(&self) -> (f64, f64) {
         let x_progress = self.pixel_progress as f64 + self.subpixel_progress;
         let mut y_progress = (x_progress + self.y_constant) % (PIXEL_SHIFT_HEIGHT_PX * 2) as f64;

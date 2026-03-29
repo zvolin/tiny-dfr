@@ -1,14 +1,18 @@
+//! Software rasterizer using tiny-skia
+
 use egui::{ClippedPrimitive, TexturesDelta, TextureId, ImageData, Rect, Mesh, Color32};
 use egui::epaint::Primitive;
 use std::collections::HashMap;
 use tiny_skia::{Pixmap, Color};
 
+/// Software rasterizer for egui primitives
 pub struct TinySkiaPainter {
     pixmap: Pixmap,
     textures: HashMap<TextureId, Pixmap>,
 }
 
 impl TinySkiaPainter {
+    /// Create a new painter with the given dimensions
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             pixmap: Pixmap::new(width, height).unwrap(),
@@ -16,30 +20,12 @@ impl TinySkiaPainter {
         }
     }
 
+    /// Paint primitives with texture updates
     pub fn paint(&mut self, primitives: &[ClippedPrimitive], textures_delta: &TexturesDelta) {
         // Update textures
-        eprintln!("[paint] textures_delta.set.len()={}, free.len()={}, existing_textures={:?}",
-            textures_delta.set.len(), textures_delta.free.len(),
-            self.textures.keys().collect::<Vec<_>>());
-
-        // Debug: check what texture IDs primitives reference
-        for prim in primitives {
-            if let Primitive::Mesh(mesh) = &prim.primitive {
-                if !self.textures.contains_key(&mesh.texture_id) {
-                    eprintln!("[paint] WARNING: Mesh references missing texture {:?}", mesh.texture_id);
-                }
-            }
-        }
-
         for (id, delta) in &textures_delta.set {
             let is_partial = delta.pos.is_some();
             let (offset_x, offset_y) = delta.pos.map(|p| (p[0], p[1])).unwrap_or((0, 0));
-
-            eprintln!("[tex] Updating {:?}: {}x{} at ({}, {}), partial={}",
-                id,
-                delta.image.width(), delta.image.height(),
-                offset_x, offset_y,
-                is_partial);
 
             if is_partial {
                 // Partial update - write into existing texture
@@ -79,8 +65,6 @@ impl TinySkiaPainter {
                             }
                         }
                     }
-                } else {
-                    eprintln!("[tex] WARNING: Partial update for non-existent texture {:?}", id);
                 }
             } else {
                 // Full texture replacement
@@ -199,6 +183,7 @@ impl TinySkiaPainter {
         }
     }
 
+    /// Get the raw pixel data
     pub fn pixels(&self) -> &[u8] {
         self.pixmap.data()
     }

@@ -1,12 +1,22 @@
+//! Converts libinput touch events to egui events
+
 use std::collections::HashMap;
 use egui::{Event, Pos2, TouchId, TouchPhase, TouchDeviceId};
 
+/// Bridge between libinput touch events and egui events
 pub struct InputBridge {
     active_touches: HashMap<u32, Pos2>,
     device_id: TouchDeviceId,
 }
 
+impl Default for InputBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InputBridge {
+    /// Create a new input bridge
     pub fn new() -> Self {
         Self {
             active_touches: HashMap::new(),
@@ -14,6 +24,7 @@ impl InputBridge {
         }
     }
 
+    /// Handle touch down event
     pub fn handle_touch_down(&mut self, slot: u32, x: f64, y: f64) -> Event {
         let pos = self.transform(x, y);
         self.active_touches.insert(slot, pos);
@@ -26,6 +37,7 @@ impl InputBridge {
         }
     }
 
+    /// Handle touch motion event
     pub fn handle_touch_motion(&mut self, slot: u32, x: f64, y: f64) -> Option<Event> {
         if !self.active_touches.contains_key(&slot) {
             return None;
@@ -41,6 +53,7 @@ impl InputBridge {
         })
     }
 
+    /// Handle touch up event
     pub fn handle_touch_up(&mut self, slot: u32) -> Option<Event> {
         let pos = self.active_touches.remove(&slot)?;
         Some(Event::Touch {

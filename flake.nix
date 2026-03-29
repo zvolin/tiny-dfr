@@ -28,6 +28,7 @@
           packages.aarch64-linux.default
         ];
         packages = [
+          pkgs.clippy
           pkgs.rustfmt
           pkgs.rust-analyzer
         ];

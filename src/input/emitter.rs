@@ -1,3 +1,5 @@
+//! Key emission via uinput virtual device
+
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use input_linux::{uinput::UInputHandle, EventKind, Key, SynchronizeKind};
@@ -5,12 +7,14 @@ use input_linux_sys::{uinput_setup, input_id, timeval, input_event};
 use libc::c_char;
 use anyhow::Result;
 
+/// Emits key events via uinput
 pub struct KeyEmitter {
     uinput: UInputHandle<File>,
     held_keys: HashSet<Key>,
 }
 
 impl KeyEmitter {
+    /// Create a new key emitter for the given keys
     pub fn new(keys: &[Key]) -> Result<Self> {
         let uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput")?);
         uinput.set_evbit(EventKind::Key)?;
@@ -43,6 +47,7 @@ impl KeyEmitter {
         })
     }
 
+    /// Set key state (pressed or released)
     pub fn set_key(&mut self, key: Key, pressed: bool) {
         if pressed && !self.held_keys.contains(&key) {
             self.held_keys.insert(key);
