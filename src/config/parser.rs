@@ -4,7 +4,7 @@ use std::fs::read_to_string;
 use anyhow::{Result, anyhow};
 use egui::Color32;
 
-use crate::core::{Button, FontStyle, FunctionLayer};
+use crate::core::{Button, Dimension, FontStyle, FunctionLayer};
 use super::types::{Config, ButtonConfig, ConfigProxy};
 
 /// Parse hex color string to Color32
@@ -19,6 +19,24 @@ pub fn parse_hex_color(hex: &str) -> Option<Color32> {
     let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
     let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
     Some(Color32::from_rgb(r, g, b))
+}
+
+/// Parse dimension from TOML value
+///
+/// Accepts:
+/// - Integer: pixels (e.g., 42)
+/// - Float: pixels (e.g., 42.5)
+/// - String ending in %: percentage (e.g., "50%")
+pub fn parse_dimension(value: &toml::Value) -> Option<Dimension> {
+    match value {
+        toml::Value::Integer(n) => Some(Dimension::Pixels(*n as f32)),
+        toml::Value::Float(n) => Some(Dimension::Pixels(*n as f32)),
+        toml::Value::String(s) if s.ends_with('%') => {
+            let num = s.trim_end_matches('%').trim().parse::<f32>().ok()?;
+            Some(Dimension::Percent(num / 100.0))
+        }
+        _ => None,
+    }
 }
 
 /// Parse style array into FontStyle
@@ -173,5 +191,35 @@ mod tests {
         let style = parse_font_style(&Some(vec!["bold".to_string(), "underline".to_string()]));
         assert!(style.bold);
         assert!(!style.italic);
+    }
+
+    #[test]
+    fn parse_dimension_integer() {
+        let val = toml::Value::Integer(100);
+        assert_eq!(parse_dimension(&val), Some(Dimension::Pixels(100.0)));
+    }
+
+    #[test]
+    fn parse_dimension_float() {
+        let val = toml::Value::Float(42.5);
+        assert_eq!(parse_dimension(&val), Some(Dimension::Pixels(42.5)));
+    }
+
+    #[test]
+    fn parse_dimension_percent() {
+        let val = toml::Value::String("50%".to_string());
+        assert_eq!(parse_dimension(&val), Some(Dimension::Percent(0.5)));
+    }
+
+    #[test]
+    fn parse_dimension_percent_with_space() {
+        let val = toml::Value::String("50 %".to_string());
+        assert_eq!(parse_dimension(&val), Some(Dimension::Percent(0.5)));
+    }
+
+    #[test]
+    fn parse_dimension_invalid() {
+        let val = toml::Value::String("invalid".to_string());
+        assert_eq!(parse_dimension(&val), None);
     }
 }
