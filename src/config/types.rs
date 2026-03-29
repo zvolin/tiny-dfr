@@ -3,6 +3,23 @@
 use input_linux::Key;
 use serde::Deserialize;
 
+/// Style definition from TOML [styles.*] section
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ButtonStyleConfig {
+    pub width: Option<toml::Value>,
+    pub height: Option<toml::Value>,
+    pub margin: Option<f32>,
+    pub border_radius: Option<f32>,
+    pub border_width: Option<f32>,
+    pub border_color: Option<String>,
+    pub background: Option<String>,
+    pub background_active: Option<String>,
+    pub foreground: Option<String>,
+    pub font: Option<String>,
+    pub font_size: Option<f32>,
+    pub font_style: Option<Vec<String>>,
+}
+
 /// Global configuration
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,11 +47,17 @@ pub struct ButtonConfig {
     pub action: Key,
     pub font_size: Option<f32>,
     pub font: Option<String>,
-    pub style: Option<Vec<String>>,
+    pub font_style: Option<Vec<String>>,
     pub foreground: Option<String>,
     pub background: Option<String>,
     pub background_active: Option<String>,
     pub corner_radius: Option<f32>,
+    pub style: Option<String>,
+    pub width: Option<toml::Value>,
+    pub height: Option<toml::Value>,
+    pub margin: Option<f32>,
+    pub border_width: Option<f32>,
+    pub border_color: Option<String>,
 }
 
 /// Internal TOML proxy for deserialization
@@ -48,4 +71,5 @@ pub(crate) struct ConfigProxy {
     pub active_brightness: Option<u32>,
     pub primary_layer_keys: Option<Vec<ButtonConfig>>,
     pub media_layer_keys: Option<Vec<ButtonConfig>>,
+    pub styles: Option<std::collections::HashMap<String, ButtonStyleConfig>>,
 }
