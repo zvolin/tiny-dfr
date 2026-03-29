@@ -1,7 +1,9 @@
 //! Function layer containing buttons
 
 use super::button::Button;
+use super::Dimension;
 use super::state::{DFR_WIDTH, DFR_HEIGHT, BUTTON_SPACING_PX};
+use crate::system::PIXEL_SHIFT_WIDTH_PX;
 
 /// A layer of function buttons
 #[derive(Debug, Default, Clone)]
@@ -32,6 +34,65 @@ impl FunctionLayer {
 
         // Touch must be in middle 80% of height (10% margin top and bottom)
         y > 0.1 * DFR_HEIGHT as f64 && y < 0.9 * DFR_HEIGHT as f64
+    }
+
+    /// Get button index at touch position
+    pub fn button_at(&self, x: f64, _y: f64, pixel_shift_enabled: bool) -> Option<usize> {
+        let available_width = DFR_WIDTH as f32;
+        let _available_height = DFR_HEIGHT as f32;
+
+        let pixel_shift_width = if pixel_shift_enabled {
+            PIXEL_SHIFT_WIDTH_PX as f32
+        } else {
+            0.0
+        };
+
+        let usable_width = available_width - pixel_shift_width;
+        let start_x = pixel_shift_width / 2.0;
+
+        // Calculate layout (same logic as renderer)
+        let mut fixed_width_total = 0.0f32;
+        let mut auto_count = 0usize;
+        let mut total_margin = 0.0f32;
+
+        for button in &self.buttons {
+            total_margin += button.margin * 2.0;
+            match button.width {
+                Dimension::Pixels(px) => fixed_width_total += px,
+                Dimension::Percent(pct) if (pct - 1.0).abs() < f32::EPSILON => auto_count += 1,
+                Dimension::Percent(pct) => fixed_width_total += usable_width * pct,
+            }
+        }
+
+        let remaining = usable_width - fixed_width_total - total_margin;
+        let auto_width = if auto_count > 0 && remaining > 0.0 {
+            remaining / auto_count as f32
+        } else {
+            0.0
+        };
+
+        // Find button at x position
+        let mut x_offset = start_x;
+        let touch_x = x as f32;
+
+        for (i, button) in self.buttons.iter().enumerate() {
+            let margin = button.margin;
+            x_offset += margin;
+
+            let width = match button.width {
+                Dimension::Pixels(px) => px,
+                Dimension::Percent(pct) if (pct - 1.0).abs() < f32::EPSILON => auto_width,
+                Dimension::Percent(pct) => usable_width * pct,
+            };
+
+            if touch_x >= x_offset && touch_x < x_offset + width {
+                return Some(i);
+            }
+
+            x_offset += width + margin;
+        }
+
+        None
     }
 }
 
