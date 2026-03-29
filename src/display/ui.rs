@@ -1,23 +1,20 @@
 //! Error display UI
 
-use egui::{Context, CentralPanel, Frame, Color32, RichText};
+use egui::{Context, CentralPanel, Frame, Color32, Align2};
 
 /// Render an error message on the Touch Bar
 pub fn render_error(ctx: &Context, message: &str) {
     CentralPanel::default()
-        .frame(Frame::none().fill(Color32::from_rgb(80, 0, 0)))
+        .frame(Frame::none().fill(Color32::BLACK))
         .show(ctx, |ui| {
-            ui.centered_and_justified(|ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("⚠").size(32.0).color(Color32::YELLOW));
-                    ui.add_space(16.0);
-                    let msg = if message.len() > 50 {
-                        format!("{}...", &message[..47])
-                    } else {
-                        message.to_string()
-                    };
-                    ui.label(RichText::new(msg).size(18.0).color(Color32::WHITE));
-                });
-            });
+            let rect = ui.available_rect_before_wrap();
+            let text = format!("⚠ {}", message);
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                text,
+                egui::FontId::new(28.0, egui::FontFamily::Proportional),
+                Color32::WHITE,
+            );
         });
 }

@@ -2,7 +2,7 @@
 
 use std::panic::{self, AssertUnwindSafe};
 use clap::Parser;
-use drm::control::ClipRect;
+use egui::{Context, RawInput, Rect, Pos2, Vec2};
 use nix::sys::signal::{Signal, SigSet};
 
 mod app;
@@ -13,7 +13,7 @@ mod input;
 mod system;
 
 use core::{DFR_WIDTH, DFR_HEIGHT};
-use display::DrmBackend;
+use display::{DrmBackend, TinySkiaPainter, render_error, copy_to_drm};
 
 #[derive(Parser)]
 #[command(name = "tiny-dfr", about = "Touch Bar daemon")]
@@ -27,37 +27,38 @@ fn main() {
     let cli = Cli::parse();
     let mut drm = DrmBackend::open_card().unwrap();
 
-    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
         app::run(&mut drm, cli.config)
     }));
 
-    // Show crash screen on panic
-    show_crash_screen(&mut drm);
+    if result.is_err() {
+        show_crash_screen(&mut drm);
 
-    // Wait for SIGTERM
-    let mut sigset = SigSet::empty();
-    sigset.add(Signal::SIGTERM);
-    sigset.wait().unwrap();
+        // Wait for SIGTERM
+        let mut sigset = SigSet::empty();
+        sigset.add(Signal::SIGTERM);
+        sigset.wait().unwrap();
+    }
 }
 
 fn show_crash_screen(drm: &mut DrmBackend) {
-    let crash_bitmap = include_bytes!("crash_bitmap.raw");
-    let mut map = drm.map().unwrap();
-    let data = map.as_mut();
+    let ctx = Context::default();
+    let mut painter = TinySkiaPainter::new(DFR_WIDTH as u32, DFR_HEIGHT as u32);
 
-    let mut wptr = 0;
-    for byte in crash_bitmap {
-        for i in 0..8 {
-            let bit = ((byte >> i) & 0x1) == 0;
-            let color = if bit { 0xFF } else { 0x0 };
-            data[wptr] = color;
-            data[wptr + 1] = color;
-            data[wptr + 2] = color;
-            data[wptr + 3] = color;
-            wptr += 4;
-        }
-    }
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(DFR_WIDTH as f32, DFR_HEIGHT as f32),
+        )),
+        ..Default::default()
+    };
 
-    drop(map);
-    drm.dirty(&[ClipRect::new(0, 0, DFR_HEIGHT as u16, DFR_WIDTH as u16)]).unwrap();
+    let output = ctx.run(input, |ctx| {
+        render_error(ctx, concat!(env!("CARGO_PKG_NAME"), " crashed"));
+    });
+
+    let primitives = ctx.tessellate(output.shapes, output.pixels_per_point);
+    painter.paint(&primitives, &output.textures_delta);
+
+    let _ = copy_to_drm(&painter, drm);
 }
