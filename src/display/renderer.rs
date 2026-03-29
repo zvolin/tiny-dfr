@@ -8,7 +8,7 @@ use egui::{
 use drm::control::ClipRect;
 
 use crate::core::{
-    Button, FunctionLayer, DFR_WIDTH, DFR_HEIGHT, DFR_STRIDE, BUTTON_SPACING_PX,
+    Button, Dimension, FunctionLayer, DFR_WIDTH, DFR_HEIGHT, DFR_STRIDE,
 };
 use crate::config::Config;
 use crate::system::PIXEL_SHIFT_WIDTH_PX;
@@ -43,6 +43,61 @@ pub fn warm_up_fonts(
     }
 }
 
+/// Calculate button layout positions
+/// Returns: Vec<(x_offset, width, height, margin)>
+fn calculate_button_layout(
+    buttons: &[Button],
+    available_width: f32,
+    available_height: f32,
+) -> Vec<(f32, f32, f32, f32)> {
+    // First pass: calculate fixed widths and count auto buttons
+    let mut fixed_width_total = 0.0f32;
+    let mut auto_count = 0usize;
+    let mut total_margin = 0.0f32;
+
+    for button in buttons {
+        total_margin += button.margin * 2.0;
+        match button.width {
+            Dimension::Pixels(px) => fixed_width_total += px,
+            Dimension::Percent(pct) if (pct - 1.0).abs() < f32::EPSILON => auto_count += 1,
+            Dimension::Percent(pct) => fixed_width_total += available_width * pct,
+        }
+    }
+
+    // Calculate auto width
+    let remaining = available_width - fixed_width_total - total_margin;
+    let auto_width = if auto_count > 0 && remaining > 0.0 {
+        remaining / auto_count as f32
+    } else {
+        0.0
+    };
+
+    // Second pass: build layout
+    let mut result = Vec::with_capacity(buttons.len());
+    let mut x_offset = 0.0f32;
+
+    for button in buttons {
+        let margin = button.margin;
+        x_offset += margin; // Left margin
+
+        let width = match button.width {
+            Dimension::Pixels(px) => px,
+            Dimension::Percent(pct) if (pct - 1.0).abs() < f32::EPSILON => auto_width,
+            Dimension::Percent(pct) => available_width * pct,
+        };
+
+        let height = match button.height {
+            Dimension::Pixels(px) => px,
+            Dimension::Percent(pct) => available_height * pct,
+        };
+
+        result.push((x_offset, width, height, margin));
+        x_offset += width + margin; // Width + right margin
+    }
+
+    result
+}
+
 /// Render a function layer using egui
 pub fn render_function_layer(
     ctx: &Context,
@@ -55,9 +110,9 @@ pub fn render_function_layer(
         .show(ctx, |ui| {
             let available_width = ui.available_width();
             let available_height = ui.available_height();
-            let num_buttons = layer.buttons.len();
+            let buttons = &layer.buttons;
 
-            if num_buttons == 0 {
+            if buttons.is_empty() {
                 return;
             }
 
@@ -67,31 +122,40 @@ pub fn render_function_layer(
                 0.0
             };
 
-            let total_spacing = BUTTON_SPACING_PX as f32 * (num_buttons - 1) as f32;
-            let button_width = (available_width - pixel_shift_width - total_spacing) / num_buttons as f32;
-            let button_height = available_height * 0.7;
-            let button_y = (available_height - button_height) / 2.0 + pixel_shift.1 as f32;
+            // Calculate button positions with per-button dimensions
+            let usable_width = available_width - pixel_shift_width;
+            let button_rects = calculate_button_layout(buttons, usable_width, available_height);
+
+            // Check for overflow
+            let total_width: f32 = button_rects.iter().map(|(_, w, _, m)| w + m * 2.0).sum();
+            if total_width > usable_width {
+                eprintln!("Warning: buttons overflow available width ({} > {})", total_width, usable_width);
+                return; // Render black bar
+            }
 
             let start_x = (pixel_shift_width / 2.0) + pixel_shift.0 as f32;
 
-            for (i, button) in layer.buttons.iter().enumerate() {
-                render_button(ui, button, i, start_x, button_y, button_width, button_height, cfg);
+            for (i, button) in buttons.iter().enumerate() {
+                let (x_offset, width, height, _margin) = button_rects[i];
+                let button_y = (available_height - height) / 2.0 + pixel_shift.1 as f32;
+                let button_x = start_x + x_offset;
+
+                render_button(ui, button, button_x, button_y, width, height, cfg);
             }
         });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_button(
     ui: &mut egui::Ui,
     button: &Button,
-    index: usize,
-    start_x: f32,
+    button_x: f32,
     button_y: f32,
     button_width: f32,
     button_height: f32,
     cfg: &Config,
 ) {
-    let button_x = start_x + index as f32 * (button_width + BUTTON_SPACING_PX as f32);
+    use egui::Stroke;
+
     let rect = Rect::from_min_size(
         Pos2::new(button_x, button_y),
         Vec2::new(button_width, button_height),
@@ -105,7 +169,14 @@ fn render_button(
         Color32::BLACK
     };
 
-    ui.painter().rect_filled(rect, button.corner_radius, bg_color);
+    // Draw background with optional border
+    let stroke = if button.border_width > 0.0 {
+        Stroke::new(button.border_width, button.border_color)
+    } else {
+        Stroke::NONE
+    };
+
+    ui.painter().rect(rect, button.corner_radius, bg_color, stroke);
 
     ui.painter().text(
         rect.center(),
