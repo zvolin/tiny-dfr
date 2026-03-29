@@ -2,11 +2,8 @@ use std::{
     fs::read_to_string,
     os::fd::AsFd
 };
-use anyhow::Error;
-use cairo::FontFace;
+use anyhow::Result;
 use crate::FunctionLayer;
-use crate::fonts::{FontConfig, Pattern};
-use freetype::Library as FtLibrary;
 use input_linux::Key;
 use nix::{
     errno::Errno,
@@ -14,12 +11,9 @@ use nix::{
 };
 use serde::Deserialize;
 
-const USER_CFG_PATH: &'static str = "/etc/tiny-dfr/config.toml";
-
 pub struct Config {
     pub show_button_outlines: bool,
     pub enable_pixel_shift: bool,
-    pub font_face: FontFace,
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
 }
@@ -30,72 +24,61 @@ struct ConfigProxy {
     media_layer_default: Option<bool>,
     show_button_outlines: Option<bool>,
     enable_pixel_shift: Option<bool>,
-    font_template: Option<String>,
+    #[allow(dead_code)]
+    font_template: Option<String>, // Kept for compatibility, but ignored (egui handles fonts)
+    default_font: Option<String>,
     adaptive_brightness: Option<bool>,
     active_brightness: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct ButtonConfig {
-    #[serde(alias = "Svg")]
-    pub icon: Option<String>,
     pub text: Option<String>,
-    pub action: Key
+    pub action: Key,
+    // Style options (all optional, fallback to defaults)
+    pub font_size: Option<f32>,
+    pub font: Option<String>,             // Font family name (e.g., "Symbols Nerd Font")
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub foreground: Option<String>,       // hex color like "#FFFFFF"
+    pub background: Option<String>,       // hex color like "#333333"
+    pub background_active: Option<String>, // hex color when pressed
+    pub corner_radius: Option<f32>,
 }
 
-fn load_font(name: &str) -> FontFace {
-    let fontconfig = FontConfig::new();
-    let mut pattern = Pattern::new(name);
-    fontconfig.perform_substitutions(&mut pattern);
-    let pat_match = match fontconfig.match_pattern(&pattern) {
-        Ok(pat) => pat,
-        Err(_) => panic!("Unable to find specified font. If you are using the default config, make sure you have at least one font installed")
-    };
-    let file_name = pat_match.get_file_name();
-    let file_idx = pat_match.get_font_index();
-    let ft_library = FtLibrary::init().unwrap();
-    let face = ft_library.new_face(file_name, file_idx).unwrap();
-    FontFace::create_from_ft(&face).unwrap()
-}
-
-fn load_config() -> (Config, [FunctionLayer; 2]) {
-    let mut base = toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap()).unwrap();
-    let user = read_to_string(USER_CFG_PATH).map_err::<Error, _>(|e| e.into())
-        .and_then(|r| Ok(toml::from_str::<ConfigProxy>(&r)?));
-    if let Ok(user) = user {
-        base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
-        base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
-        base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
-        base.font_template = user.font_template.or(base.font_template);
-        base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
-        base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
-        base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
-        base.active_brightness = user.active_brightness.or(base.active_brightness);
-    };
-    let media_layer = FunctionLayer::with_config(base.media_layer_keys.unwrap());
-    let fkey_layer = FunctionLayer::with_config(base.primary_layer_keys.unwrap());
-    let layers = if base.media_layer_default.unwrap(){ [media_layer, fkey_layer] } else { [fkey_layer, media_layer] };
+fn load_config(path: &str) -> Result<(Config, [FunctionLayer; 2])> {
+    let proxy = toml::from_str::<ConfigProxy>(&read_to_string(path)?)?;
+    let default_font = proxy.default_font.clone();
+    let media_layer = FunctionLayer::with_config(
+        proxy.media_layer_keys.ok_or_else(|| anyhow::anyhow!("Missing MediaLayerKeys"))?,
+        &default_font
+    );
+    let fkey_layer = FunctionLayer::with_config(
+        proxy.primary_layer_keys.ok_or_else(|| anyhow::anyhow!("Missing PrimaryLayerKeys"))?,
+        &default_font
+    );
+    let layers = if proxy.media_layer_default.unwrap_or(false) { [media_layer, fkey_layer] } else { [fkey_layer, media_layer] };
     let cfg = Config {
-        show_button_outlines: base.show_button_outlines.unwrap(),
-        enable_pixel_shift: base.enable_pixel_shift.unwrap(),
-        adaptive_brightness: base.adaptive_brightness.unwrap(),
-        font_face: load_font(&base.font_template.unwrap()),
-        active_brightness: base.active_brightness.unwrap()
+        show_button_outlines: proxy.show_button_outlines.unwrap_or(true),
+        enable_pixel_shift: proxy.enable_pixel_shift.unwrap_or(true),
+        adaptive_brightness: proxy.adaptive_brightness.unwrap_or(true),
+        active_brightness: proxy.active_brightness.unwrap_or(100),
     };
-    (cfg, layers)
+    Ok((cfg, layers))
 }
 
 pub struct ConfigManager {
     inotify_fd: Inotify,
-    watch_desc: Option<WatchDescriptor>
+    watch_desc: Option<WatchDescriptor>,
+    config_path: String,
 }
 
-fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
+fn arm_inotify(inotify_fd: &Inotify, config_path: &str) -> Option<WatchDescriptor> {
     let flags = AddWatchFlags::IN_MOVED_TO | AddWatchFlags::IN_CLOSE | AddWatchFlags::IN_ONESHOT;
-    match inotify_fd.add_watch(USER_CFG_PATH, flags) {
+    match inotify_fd.add_watch(config_path, flags) {
         Ok(wd) => Some(wd),
         Err(Errno::ENOENT) => None,
         e => Some(e.unwrap())
@@ -103,39 +86,42 @@ fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
 }
 
 impl ConfigManager {
-    pub fn new() -> ConfigManager {
+    pub fn new(config_path: String) -> ConfigManager {
         let inotify_fd = Inotify::init(InitFlags::IN_NONBLOCK).unwrap();
-        let watch_desc = arm_inotify(&inotify_fd);
+        let watch_desc = arm_inotify(&inotify_fd, &config_path);
         ConfigManager {
-            inotify_fd, watch_desc
+            inotify_fd, watch_desc, config_path
         }
     }
-    pub fn load_config(&self) -> (Config, [FunctionLayer; 2]) {
-        load_config()
+
+    pub fn load_config(&self) -> Result<(Config, [FunctionLayer; 2])> {
+        load_config(&self.config_path)
     }
-    pub fn update_config(&mut self, cfg: &mut Config, layers: &mut [FunctionLayer; 2]) -> bool {
+
+    pub fn try_update_config(&mut self, cfg: &mut Config, layers: &mut [FunctionLayer; 2]) -> Result<bool> {
         if self.watch_desc.is_none() {
-            self.watch_desc = arm_inotify(&self.inotify_fd);
-            return false;
+            self.watch_desc = arm_inotify(&self.inotify_fd, &self.config_path);
+            return Ok(false);
         }
         let evts = match self.inotify_fd.read_events() {
             Ok(e) => e,
             Err(Errno::EAGAIN) => Vec::new(),
-            r => r.unwrap(),
+            r => r?,
         };
         let mut ret = false;
         for evt in evts {
             if evt.wd != self.watch_desc.unwrap() {
                 continue
             }
-            let parts = load_config();
-            *cfg = parts.0;
-            *layers = parts.1;
+            let (new_cfg, new_layers) = load_config(&self.config_path)?;
+            *cfg = new_cfg;
+            *layers = new_layers;
             ret = true;
-            self.watch_desc = arm_inotify(&self.inotify_fd);
+            self.watch_desc = arm_inotify(&self.inotify_fd, &self.config_path);
         }
-        ret
+        Ok(ret)
     }
+
     pub fn fd(&self) -> &impl AsFd {
         &self.inotify_fd
     }

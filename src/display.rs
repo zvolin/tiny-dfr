@@ -192,7 +192,7 @@ impl DrmBackend {
     pub fn dirty(&self, clips: &[ClipRect]) -> Result<()> {
         Ok(self.card.dirty_framebuffer(self.fb, clips)?)
     }
-    pub fn map(&mut self) -> Result<DumbMapping> {
+    pub fn map(&mut self) -> Result<DumbMapping<'_>> {
         Ok(self.card.map_dumb_buffer(&mut self.db)?)
     }
 }

@@ -28,7 +28,9 @@ fn read_attr(path: &Path, attr: &str) -> u32 {
 fn find_backlight() -> Result<PathBuf> {
     for entry in fs::read_dir("/sys/class/backlight/")? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().contains("display-pipe") {
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Touch Bar is connected via DSI, look for .dsi. or display-pipe (older naming)
+        if name.contains(".dsi.") || name.contains("display-pipe") {
             return Ok(entry.path());
         }
     }

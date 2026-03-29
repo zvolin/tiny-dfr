@@ -10,8 +10,8 @@ repository = "https://github.com/WhatAmISupposedToPutHere/tiny-dfr"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-cairo-rs = { version = "0.18", default-features = false, features = ["freetype"] }
-librsvg = "2.57"
+egui = "0.29"
+tiny-skia = "0.11"
 drm = "0.11.1"
 anyhow = "1"
 input = "0.8"
@@ -22,8 +22,5 @@ nix = { version = "0.27", features = ["event", "signal", "inotify"] }
 privdrop = "0.5.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+clap = { version = "4", features = ["derive"] }
 rand = "0.8"
-freetype-rs = "0.32"
-
-[build-dependencies]
-pkg-config = "0.3"

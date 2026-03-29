@@ -1,18 +1,18 @@
 use std::{
     fs::{File, OpenOptions},
     os::{
-        fd::{AsRawFd, AsFd},
+        fd::AsFd,
         unix::{io::OwnedFd, fs::OpenOptionsExt}
     },
     path::Path,
     collections::HashMap,
     cmp::min,
-    panic::{self, AssertUnwindSafe}
+    panic::{self, AssertUnwindSafe},
 };
-use cairo::{ImageSurface, Format, Context, Surface, Rectangle, Antialias};
-use rsvg::{Loader, CairoRenderer, SvgHandle};
+use egui::{Context, RawInput, Rect, Pos2, Vec2, CentralPanel, Frame, Color32, FontId, Align2, ViewportId, FontFamily, FontDefinitions, FontData};
 use drm::control::ClipRect;
 use anyhow::Result;
+use clap::Parser;
 use input::{
     Libinput, LibinputInterface, Device as InputDevice,
     event::{
@@ -21,246 +21,214 @@ use input::{
         keyboard::{KeyboardEvent, KeyboardEventTrait, KeyState}
     }
 };
-use libc::{O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY, c_char};
-use input_linux::{uinput::UInputHandle, EventKind, Key, SynchronizeKind};
-use input_linux_sys::{uinput_setup, input_id, timeval, input_event};
+use libc::{O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY};
+use input_linux::Key;
 use nix::{
     sys::{
         signal::{Signal, SigSet},
         epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags}
-    }, 
+    },
     errno::Errno
 };
 use privdrop::PrivDrop;
 
+#[derive(Parser)]
+#[command(name = "tiny-dfr", about = "Touch Bar daemon")]
+struct Cli {
+    /// Path to config file
+    #[arg(short, long, default_value = "/etc/tiny-dfr/config.toml")]
+    config: String,
+}
+
 mod backlight;
 mod display;
 mod pixel_shift;
-mod fonts;
 mod config;
+mod painter;
+mod input_bridge;
+mod ui;
+mod key_emitter;
 
 use backlight::BacklightManager;
 use display::DrmBackend;
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
-use config::{ButtonConfig, Config};
-use crate::config::ConfigManager;
+use config::{ButtonConfig, Config, ConfigManager};
+use painter::TinySkiaPainter;
+use input_bridge::InputBridge;
+use key_emitter::KeyEmitter;
 
 const DFR_WIDTH: i32 = 2008;
 const DFR_HEIGHT: i32 = 60;
 const DFR_STRIDE: i32 = 64;
 const BUTTON_SPACING_PX: i32 = 16;
-const BUTTON_COLOR_INACTIVE: f64 = 0.200;
-const BUTTON_COLOR_ACTIVE: f64 = 0.400;
-const ICON_SIZE: i32 = 48;
-const TIMEOUT_MS: i32 = 10 * 1000;
+pub const TIMEOUT_MS: i32 = 10 * 1000;
 
-enum ButtonImage {
-    Text(String),
-    Svg(SvgHandle),
-    Bitmap(ImageSurface)
+/// Represents the current state of the Touch Bar
+enum TouchBarState {
+    /// Normal operation with function layers
+    Normal,
+    /// Error state displaying a message
+    Error(String),
 }
 
-struct Button {
-    image: ButtonImage,
-    changed: bool,
+/// A button in a function layer
+pub struct Button {
+    /// Display text
+    pub text: String,
+    /// Key to emit when pressed
+    pub action: Key,
+    /// Whether button is currently pressed
     active: bool,
-    action: Key
+    // Style
+    pub font_size: f32,
+    pub font_family: String,  // Font family name or empty for default
+    pub bold: bool,
+    pub italic: bool,
+    pub foreground: Color32,
+    pub background: Color32,
+    pub background_active: Color32,
+    pub corner_radius: f32,
 }
 
-fn try_load_svg(path: &str) -> Result<ButtonImage> {
-    let handle = Loader::new().read_path(format!("/etc/tiny-dfr/{}.svg", path)).or_else(|_| {
-        Loader::new().read_path(format!("/usr/share/tiny-dfr/{}.svg", path))
-    })?;
-    Ok(ButtonImage::Svg(handle))
-}
-
-fn try_load_png(path: &str) -> Result<ButtonImage> {
-    let mut file = File::open(format!("/etc/tiny-dfr/{}.png", path)).or_else(|_| {
-        File::open(format!("/usr/share/tiny-dfr/{}.png", path))
-    })?;
-    let surf = ImageSurface::create_from_png(&mut file)?;
-    if surf.height() == ICON_SIZE && surf.width() == ICON_SIZE {
-        return Ok(ButtonImage::Bitmap(surf));
+fn parse_hex_color(hex: &str) -> Option<Color32> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Color32::from_rgb(r, g, b))
+    } else {
+        None
     }
-    let resized = ImageSurface::create(Format::ARgb32, ICON_SIZE, ICON_SIZE).unwrap();
-    let c = Context::new(&resized).unwrap();
-    c.scale(ICON_SIZE as f64 / surf.width() as f64, ICON_SIZE as f64 / surf.height() as f64);
-    c.set_source_surface(surf, 0.0, 0.0).unwrap();
-    c.set_antialias(Antialias::Best);
-    c.paint().unwrap();
-    return Ok(ButtonImage::Bitmap(resized));
+}
+
+fn load_custom_fonts(ctx: &Context, layers: &[FunctionLayer; 2]) {
+    // Collect unique font names from all buttons
+    let mut font_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for layer in layers {
+        for button in &layer.buttons {
+            if !button.font_family.is_empty() {
+                font_names.insert(button.font_family.clone());
+            }
+        }
+    }
+
+    // If no custom fonts needed, skip
+    if font_names.is_empty() {
+        return;
+    }
+
+    let mut fonts = FontDefinitions::default();
+    let mut loaded_fonts: Vec<String> = Vec::new();
+
+    // Try to load each font from system
+    for font_name in &font_names {
+        // If font_name looks like a path, load directly; otherwise use fc-match
+        let font_data = if font_name.contains('/') {
+            std::fs::read(font_name).ok()
+        } else {
+            load_system_font(font_name)
+        };
+
+        if let Some(data) = font_data {
+            let mut fd = FontData::from_owned(data);
+            fd.index = 0;  // Use first font in collection
+            fonts.font_data.insert(font_name.clone(), fd);
+            loaded_fonts.push(font_name.clone());
+        }
+    }
+
+    // Replace Proportional family: custom fonts first, then defaults
+    if !loaded_fonts.is_empty() {
+        let mut new_proportional = loaded_fonts.clone();
+        // Keep Ubuntu-Light as fallback for ASCII (it's egui's default)
+        new_proportional.push("Ubuntu-Light".to_owned());
+        eprintln!("[font] Setting Proportional family: {:?}", new_proportional);
+        fonts.families.insert(FontFamily::Proportional, new_proportional);
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+fn debug_glyph_coverage(ctx: &Context, layers: &[FunctionLayer; 2]) {
+    eprintln!("[font] Checking glyph coverage for text samples...");
+    ctx.fonts(|fonts_reader| {
+        let font_id = FontId::proportional(24.0);
+        for layer in layers {
+            for button in &layer.buttons {
+                for ch in button.text.chars() {
+                    let width = fonts_reader.glyph_width(&font_id, ch);
+                    let codepoint = ch as u32;
+                    if width == 0.0 || codepoint > 0xFFFF {
+                        eprintln!("[font] char '{}' U+{:05X}: width={}", ch, codepoint, width);
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn load_system_font(name: &str) -> Option<Vec<u8>> {
+    // Try with fontconfig via fc-match
+    if let Ok(output) = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", name])
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout);
+            let path = path.trim();
+            if !path.is_empty() {
+                if let Ok(data) = std::fs::read(path) {
+                    return Some(data);
+                }
+            }
+        }
+    }
+    None
 }
 
 impl Button {
-    fn with_config(cfg: ButtonConfig) -> Button {
-        if let Some(text) = cfg.text {
-            Button::new_text(text, cfg.action)
-        } else if let Some(icon) = cfg.icon {
-            Button::new_icon(&icon, cfg.action)
-        } else {
-            panic!("Invalid config, a button must have either Text or Icon")
-        }
-    }
-    fn new_text(text: String, action: Key) -> Button {
+    pub fn with_config(cfg: ButtonConfig, default_font: &Option<String>) -> Button {
+        let text = cfg.text.unwrap_or_else(|| "?".to_string());
+        let font_family = cfg.font
+            .or_else(|| default_font.clone())
+            .unwrap_or_default();
         Button {
-            action,
+            text,
+            action: cfg.action,
             active: false,
-            changed: false,
-            image: ButtonImage::Text(text)
-        }
-    }
-    fn new_icon(path: &str, action: Key) -> Button {
-        let image = try_load_svg(path).or_else(|_| try_load_png(path)).unwrap();
-        Button {
-            action, image,
-            active: false,
-            changed: false,
-        }
-    }
-    fn render(&self, c: &Context, button_left_edge: f64, button_width: u64, y_shift: f64) {
-        match &self.image {
-            ButtonImage::Text(text) => {
-                let extents = c.text_extents(text).unwrap();
-                c.move_to(
-                    button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
-                    y_shift + (DFR_HEIGHT as f64 / 2.0 + extents.height() / 2.0).round()
-                );
-                c.show_text(text).unwrap();
-            },
-            ButtonImage::Svg(svg) => {
-                let renderer = CairoRenderer::new(&svg);
-                let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
-                let y = y_shift + ((DFR_HEIGHT as f64 - ICON_SIZE as f64) / 2.0).round();
-
-                renderer.render_document(c,
-                    &Rectangle::new(x, y, ICON_SIZE as f64, ICON_SIZE as f64)
-                ).unwrap();
-            }
-            ButtonImage::Bitmap(surf) => {
-                let x = button_left_edge + (button_width as f64 / 2.0 - (ICON_SIZE / 2) as f64).round();
-                let y = y_shift + ((DFR_HEIGHT as f64 - ICON_SIZE as f64) / 2.0).round();
-                c.set_source_surface(surf, x, y).unwrap();
-                c.rectangle(x, y, ICON_SIZE as f64, ICON_SIZE as f64);
-                c.fill().unwrap();
-            }
-        }
-    }
-    fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool) where F: AsRawFd {
-        if self.active != active {
-            self.active = active;
-            self.changed = true;
-
-            toggle_key(uinput, self.action, active as i32);
+            font_size: cfg.font_size.unwrap_or(24.0),
+            font_family,
+            bold: cfg.bold.unwrap_or(false),
+            italic: cfg.italic.unwrap_or(false),
+            foreground: cfg.foreground
+                .and_then(|c| parse_hex_color(&c))
+                .unwrap_or(Color32::WHITE),
+            background: cfg.background
+                .and_then(|c| parse_hex_color(&c))
+                .unwrap_or(Color32::from_gray(51)),
+            background_active: cfg.background_active
+                .and_then(|c| parse_hex_color(&c))
+                .unwrap_or(Color32::from_gray(102)),
+            corner_radius: cfg.corner_radius.unwrap_or(8.0),
         }
     }
 }
 
+/// A layer of function buttons
 #[derive(Default)]
 pub struct FunctionLayer {
-    buttons: Vec<Button>
+    pub buttons: Vec<Button>,
 }
 
 impl FunctionLayer {
-    fn with_config(cfg: Vec<ButtonConfig>) -> FunctionLayer {
+    pub fn with_config(cfg: Vec<ButtonConfig>, default_font: &Option<String>) -> FunctionLayer {
         if cfg.is_empty() {
             panic!("Invalid configuration, layer has 0 buttons");
         }
         FunctionLayer {
-            buttons: cfg.into_iter().map(Button::with_config).collect()
+            buttons: cfg.into_iter().map(|c| Button::with_config(c, default_font)).collect()
         }
-    }
-    fn draw(&mut self, config: &Config, surface: &Surface, pixel_shift: (f64, f64), complete_redraw: bool) -> Vec<ClipRect> {
-        let c = Context::new(&surface).unwrap();
-        let mut modified_regions = if complete_redraw {
-            vec![ClipRect::new(0, 0, DFR_HEIGHT as u16, DFR_WIDTH as u16)]
-        } else {
-            Vec::new()
-        };
-        c.translate(DFR_HEIGHT as f64, 0.0);
-        c.rotate((90.0f64).to_radians());
-        let pixel_shift_width = if config.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX } else { 0 };
-        let button_width = ((DFR_WIDTH - pixel_shift_width as i32) - (BUTTON_SPACING_PX * (self.buttons.len() - 1) as i32)) as f64 / self.buttons.len() as f64;
-        let radius = 8.0f64;
-        let bot = (DFR_HEIGHT as f64) * 0.15;
-        let top = (DFR_HEIGHT as f64) * 0.85;
-        let (pixel_shift_x, pixel_shift_y) = pixel_shift;
-
-        if complete_redraw {
-            c.set_source_rgb(0.0, 0.0, 0.0);
-            c.paint().unwrap();
-        }
-        c.set_font_face(&config.font_face);
-        c.set_font_size(32.0);
-        for (i, button) in self.buttons.iter_mut().enumerate() {
-            if !button.changed && !complete_redraw {
-                continue;
-            };
-
-            let left_edge = (i as f64 * (button_width + BUTTON_SPACING_PX as f64)).floor() + pixel_shift_x + (pixel_shift_width / 2) as f64;
-            let color = if button.active {
-                BUTTON_COLOR_ACTIVE
-            } else if config.show_button_outlines {
-                BUTTON_COLOR_INACTIVE
-            } else {
-                0.0
-            };
-            if !complete_redraw {
-                c.set_source_rgb(0.0, 0.0, 0.0);
-                c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
-                c.fill().unwrap();
-            }
-            c.set_source_rgb(color, color, color);
-            // draw box with rounded corners
-            c.new_sub_path();
-            let left = left_edge + radius;
-            let right = (left_edge + button_width.ceil()) - radius;
-            c.arc(
-                right,
-                bot,
-                radius,
-                (-90.0f64).to_radians(),
-                (0.0f64).to_radians(),
-            );
-            c.arc(
-                right,
-                top,
-                radius,
-                (0.0f64).to_radians(),
-                (90.0f64).to_radians(),
-            );
-            c.arc(
-                left,
-                top,
-                radius,
-                (90.0f64).to_radians(),
-                (180.0f64).to_radians(),
-            );
-            c.arc(
-                left,
-                bot,
-                radius,
-                (180.0f64).to_radians(),
-                (270.0f64).to_radians(),
-            );
-            c.close_path();
-
-            c.fill().unwrap();
-            c.set_source_rgb(1.0, 1.0, 1.0);
-            button.render(&c, left_edge, button_width.ceil() as u64, pixel_shift_y);
-
-            button.changed = false;
-
-            if !complete_redraw {
-                modified_regions.push(ClipRect::new(
-                    DFR_HEIGHT as u16 - top as u16 - radius as u16,
-                    left_edge as u16,
-                    DFR_HEIGHT as u16 - bot as u16 + radius as u16,
-                    left_edge as u16 + button_width as u16
-                ));
-            }
-        }
-
-        modified_regions
     }
 }
 
@@ -283,38 +251,14 @@ impl LibinputInterface for Interface {
     }
 }
 
-
-fn button_hit(num: u32, idx: u32, x: f64, y: f64) -> bool {
-    let button_width = (DFR_WIDTH - (BUTTON_SPACING_PX * (num - 1) as i32)) as f64 / num as f64;
-    let left_edge = idx as f64 * (button_width + BUTTON_SPACING_PX as f64);
-    if x < left_edge || x > (left_edge + button_width) {
-        return false
-    }
-    y > 0.1 * DFR_HEIGHT as f64 && y < 0.9 * DFR_HEIGHT as f64
-}
-
-fn emit<F>(uinput: &mut UInputHandle<F>, ty: EventKind, code: u16, value: i32) where F: AsRawFd {
-    uinput.write(&[input_event {
-        value: value,
-        type_: ty as u16,
-        code: code,
-        time: timeval {
-            tv_sec: 0,
-            tv_usec: 0
-        }
-    }]).unwrap();
-}
-
-fn toggle_key<F>(uinput: &mut UInputHandle<F>, code: Key, value: i32) where F: AsRawFd {
-    emit(uinput, EventKind::Key, code as u16, value);
-    emit(uinput, EventKind::Synchronize, SynchronizeKind::Report as u16, 0);
-}
-
 fn main() {
+    let cli = Cli::parse();
     let mut drm = DrmBackend::open_card().unwrap();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
-        real_main(&mut drm)
+        run(&mut drm, cli.config)
     }));
+
+    // Show crash screen on panic
     let crash_bitmap = include_bytes!("crash_bitmap.raw");
     let mut map = drm.map().unwrap();
     let data = map.as_mut();
@@ -331,99 +275,148 @@ fn main() {
         }
     }
     drop(map);
-    drm.dirty(&[ClipRect::new(0, 0, DFR_HEIGHT as u16, DFR_WIDTH as u16)]).unwrap();
+    drm.dirty([ClipRect::new(0, 0, DFR_HEIGHT as u16, DFR_WIDTH as u16)].as_slice()).unwrap();
+
+    // Wait for SIGTERM
     let mut sigset = SigSet::empty();
     sigset.add(Signal::SIGTERM);
     sigset.wait().unwrap();
 }
 
-fn real_main(drm: &mut DrmBackend) {
-    let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
+fn run(drm: &mut DrmBackend, config_path: String) -> Result<()> {
+    // Setup egui context
+    let ctx = Context::default();
+    // Painter matches user view: 2008 wide x 60 tall, will be rotated when copying to DRM
+    let mut painter = TinySkiaPainter::new(DFR_WIDTH as u32, DFR_HEIGHT as u32);
+    let mut input_bridge = InputBridge::new();
+
+    // Load config
     let mut backlight = BacklightManager::new();
-    let mut cfg_mgr = ConfigManager::new();
-    let (mut cfg, mut layers) = cfg_mgr.load_config();
+    let mut cfg_mgr = ConfigManager::new(config_path);
+    let (mut cfg, mut layers, mut state) = match cfg_mgr.load_config() {
+        Ok((c, l)) => (c, l, TouchBarState::Normal),
+        Err(e) => {
+            // Create default config for error state
+            let default_cfg = Config {
+                show_button_outlines: true,
+                enable_pixel_shift: false,
+                adaptive_brightness: true,
+                active_brightness: 100,
+            };
+            let default_layers = [FunctionLayer::default(), FunctionLayer::default()];
+            (default_cfg, default_layers, TouchBarState::Error(e.to_string()))
+        }
+    };
+
+    // Load custom fonts and warm up the font atlas
+    load_custom_fonts(&ctx, &layers);
+
+    // Run a few warm-up frames to let egui build font atlas
+    // IMPORTANT: Must process texture deltas or we lose the font atlas!
+    for _ in 0..3 {
+        let mut warmup_input = RawInput::default();
+        warmup_input.screen_rect = Some(Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(DFR_WIDTH as f32, DFR_HEIGHT as f32),
+        ));
+        let full_output = ctx.run(warmup_input, |ctx| {
+            // Render both layers to pre-cache all glyphs
+            render_function_layer(ctx, &layers[0], &cfg, (0.0, 0.0));
+            render_function_layer(ctx, &layers[1], &cfg, (0.0, 0.0));
+        });
+        // Process texture updates (creates the font atlas)
+        let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        painter.paint(&primitives, &full_output.textures_delta);
+    }
+
+    // Debug: check glyph coverage after fonts are ready
+    debug_glyph_coverage(&ctx, &layers);
+
     let mut pixel_shift = PixelShiftManager::new();
 
-    // drop privileges to input and video group
-    let groups = ["input", "video"];
+    // Collect all keys for the KeyEmitter
+    let all_keys: Vec<Key> = layers.iter()
+        .flat_map(|layer| layer.buttons.iter().map(|b| b.action))
+        .collect();
+    let mut key_emitter = KeyEmitter::new(&all_keys)?;
 
+    // Setup libinput
+    let mut input_tb = Libinput::new_with_udev(Interface);
+    let mut input_main = Libinput::new_with_udev(Interface);
+    input_tb.udev_assign_seat("seat-touchbar").unwrap();
+    input_main.udev_assign_seat("seat0").unwrap();
+
+    // Setup epoll
+    let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
+    epoll.add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0)).unwrap();
+    epoll.add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1)).unwrap();
+    epoll.add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2)).unwrap();
+
+    // Drop privileges to input and video group
+    let groups = ["input", "video"];
     PrivDrop::default()
         .user("nobody")
         .group_list(&groups)
         .apply()
         .unwrap_or_else(|e| { panic!("Failed to drop privileges: {}", e) });
 
-    let mut surface = ImageSurface::create(Format::ARgb32, DFR_STRIDE, DFR_WIDTH).unwrap();
     let mut active_layer = 0;
-    let mut needs_complete_redraw = true;
-
-    let mut input_tb = Libinput::new_with_udev(Interface);
-    let mut input_main = Libinput::new_with_udev(Interface);
-    input_tb.udev_assign_seat("seat-touchbar").unwrap();
-    input_main.udev_assign_seat("seat0").unwrap();
-    let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
-    epoll.add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0)).unwrap();
-    epoll.add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1)).unwrap();
-    epoll.add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2)).unwrap();
-    uinput.set_evbit(EventKind::Key).unwrap();
-    for layer in &layers {
-        for button in &layer.buttons {
-            uinput.set_keybit(button.action).unwrap();
-        }
-    }
-    let mut dev_name_c = [0 as c_char; 80];
-    let dev_name = "Dynamic Function Row Virtual Input Device".as_bytes();
-    for i in 0..dev_name.len() {
-        dev_name_c[i] = dev_name[i] as c_char;
-    }
-    uinput.dev_setup(&uinput_setup {
-        id: input_id {
-            bustype: 0x19,
-            vendor: 0x1209,
-            product: 0x316E,
-            version: 1
-        },
-        ff_effects_max: 0,
-        name: dev_name_c
-    }).unwrap();
-    uinput.dev_create().unwrap();
-
+    let mut needs_redraw = true;
     let mut digitizer: Option<InputDevice> = None;
-    let mut touches = HashMap::new();
+    let mut touches: HashMap<u32, (usize, usize)> = HashMap::new(); // slot -> (layer, button_idx)
+
     loop {
-        if cfg_mgr.update_config(&mut cfg, &mut layers) {
-            active_layer = 0;
-            needs_complete_redraw = true;
+        // Check for config updates
+        match cfg_mgr.try_update_config(&mut cfg, &mut layers) {
+            Ok(true) => {
+                active_layer = 0;
+                needs_redraw = true;
+                state = TouchBarState::Normal;
+                load_custom_fonts(&ctx, &layers);  // Reload fonts on config change
+                // Warm up font atlas after reload - must process texture deltas!
+                for _ in 0..3 {
+                    let mut warmup_input = RawInput::default();
+                    warmup_input.screen_rect = Some(Rect::from_min_size(
+                        Pos2::ZERO,
+                        Vec2::new(DFR_WIDTH as f32, DFR_HEIGHT as f32),
+                    ));
+                    let full_output = ctx.run(warmup_input, |ctx| {
+                        render_function_layer(ctx, &layers[0], &cfg, (0.0, 0.0));
+                        render_function_layer(ctx, &layers[1], &cfg, (0.0, 0.0));
+                    });
+                    let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+                    painter.paint(&primitives, &full_output.textures_delta);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                state = TouchBarState::Error(e.to_string());
+                needs_redraw = true;
+            }
         }
 
+        // Handle pixel shift
         let mut next_timeout_ms = TIMEOUT_MS;
         if cfg.enable_pixel_shift {
             let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
             if pixel_shift_needs_redraw {
-                needs_complete_redraw = true;
+                needs_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
-        if needs_complete_redraw || layers[active_layer].buttons.iter().any(|b| b.changed) {
-            let shift = if cfg.enable_pixel_shift {
-                pixel_shift.get()
-            } else {
-                (0.0, 0.0)
-            };
-            let clips = layers[active_layer].draw(&cfg, &surface, shift, needs_complete_redraw);
-            let data = surface.data().unwrap();
-            drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
-            drm.dirty(&clips).unwrap();
-            needs_complete_redraw = false;
-        }
+        // Build RawInput for egui
+        // Screen is 2008 wide x 60 tall (user's perspective)
+        let mut raw_input = RawInput::default();
+        raw_input.screen_rect = Some(Rect::from_min_size(
+            Pos2::ZERO,
+            Vec2::new(DFR_WIDTH as f32, DFR_HEIGHT as f32),
+        ));
 
-        match epoll.wait(&mut [EpollEvent::new(EpollFlags::EPOLLIN, 0)], next_timeout_ms as isize) {
-            Err(Errno::EINTR) | Ok(_) => { 0 },
-            e => e.unwrap(),
-        };
+        // Process input events
         input_tb.dispatch().unwrap();
         input_main.dispatch().unwrap();
+
         for event in &mut input_tb.clone().chain(input_main.clone()) {
             backlight.process_event(&event);
             match event {
@@ -441,7 +434,7 @@ fn real_main(drm: &mut DrmBackend) {
                         };
                         if active_layer != new_layer {
                             active_layer = new_layer;
-                            needs_complete_redraw = true;
+                            needs_redraw = true;
                         }
                     }
                 },
@@ -449,33 +442,61 @@ fn real_main(drm: &mut DrmBackend) {
                     if Some(te.device()) != digitizer || backlight.current_bl() == 0 {
                         continue
                     }
+
                     match te {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(DFR_WIDTH as u32);
                             let y = dn.y_transformed(DFR_HEIGHT as u32);
-                            let btn = (x / (DFR_WIDTH as f64 / layers[active_layer].buttons.len() as f64)) as u32;
-                            if button_hit(layers[active_layer].buttons.len() as u32, btn, x, y) {
-                                touches.insert(dn.seat_slot(), (active_layer, btn));
-                                layers[active_layer].buttons[btn as usize].set_active(&mut uinput, true);
-                            }
-                        },
-                        TouchEvent::Motion(mtn) => {
-                            if !touches.contains_key(&mtn.seat_slot()) {
-                                continue;
+                            let slot = dn.seat_slot();
+
+                            // Determine which button was hit
+                            let num_buttons = layers[active_layer].buttons.len();
+                            let btn_idx = (x / (DFR_WIDTH as f64 / num_buttons as f64)) as usize;
+
+                            if btn_idx < num_buttons && button_hit(num_buttons, btn_idx, x, y) {
+                                touches.insert(slot, (active_layer, btn_idx));
+                                layers[active_layer].buttons[btn_idx].active = true;
+                                key_emitter.set_key(layers[active_layer].buttons[btn_idx].action, true);
+                                needs_redraw = true;
                             }
 
+                            // Also add egui event
+                            let egui_event = input_bridge.handle_touch_down(slot, x, y);
+                            raw_input.events.push(egui_event);
+                        },
+                        TouchEvent::Motion(mtn) => {
                             let x = mtn.x_transformed(DFR_WIDTH as u32);
                             let y = mtn.y_transformed(DFR_HEIGHT as u32);
-                            let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
-                            let hit = button_hit(layers[layer].buttons.len() as u32, btn, x, y);
-                            layers[layer].buttons[btn as usize].set_active(&mut uinput, hit);
+                            let slot = mtn.seat_slot();
+
+                            if let Some(&(layer, btn_idx)) = touches.get(&slot) {
+                                let num_buttons = layers[layer].buttons.len();
+                                let hit = button_hit(num_buttons, btn_idx, x, y);
+                                if layers[layer].buttons[btn_idx].active != hit {
+                                    layers[layer].buttons[btn_idx].active = hit;
+                                    key_emitter.set_key(layers[layer].buttons[btn_idx].action, hit);
+                                    needs_redraw = true;
+                                }
+                            }
+
+                            if let Some(egui_event) = input_bridge.handle_touch_motion(slot, x, y) {
+                                raw_input.events.push(egui_event);
+                            }
                         },
                         TouchEvent::Up(up) => {
-                            if !touches.contains_key(&up.seat_slot()) {
-                                continue;
+                            let slot = up.seat_slot();
+
+                            if let Some((layer, btn_idx)) = touches.remove(&slot) {
+                                if layers[layer].buttons[btn_idx].active {
+                                    layers[layer].buttons[btn_idx].active = false;
+                                    key_emitter.set_key(layers[layer].buttons[btn_idx].action, false);
+                                    needs_redraw = true;
+                                }
                             }
-                            let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
-                            layers[layer].buttons[btn as usize].set_active(&mut uinput, false);
+
+                            if let Some(egui_event) = input_bridge.handle_touch_up(slot) {
+                                raw_input.events.push(egui_event);
+                            }
                         }
                         _ => {}
                     }
@@ -483,6 +504,146 @@ fn real_main(drm: &mut DrmBackend) {
                 _ => {}
             }
         }
+
+        // Render if needed
+        if needs_redraw {
+            let pixel_shift_offset = if cfg.enable_pixel_shift {
+                pixel_shift.get()
+            } else {
+                (0.0, 0.0)
+            };
+
+            // Run egui frames until atlas is ready (max 5 iterations to prevent infinite loop)
+            let mut current_input = raw_input; // Use the real input for first frame
+            for _ in 0..5 {
+                // Run egui frame
+                let full_output = ctx.run(current_input, |ctx| {
+                    match &state {
+                        TouchBarState::Error(msg) => {
+                            ui::render_error(ctx, msg);
+                        }
+                        TouchBarState::Normal => {
+                            render_function_layer(ctx, &layers[active_layer], &cfg, pixel_shift_offset);
+                        }
+                    }
+                });
+
+                // Tessellate and paint
+                let primitives = ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+                painter.paint(&primitives, &full_output.textures_delta);
+
+                // Check if egui needs another frame (font atlas updates, etc.)
+                if !full_output.viewport_output[&ViewportId::ROOT].repaint_delay.is_zero() {
+                    break; // Atlas is ready, exit loop
+                }
+
+                // Build fresh input for subsequent frames (no events, just screen rect)
+                current_input = RawInput::default();
+                current_input.screen_rect = Some(Rect::from_min_size(
+                    Pos2::ZERO,
+                    Vec2::new(DFR_WIDTH as f32, DFR_HEIGHT as f32),
+                ));
+            }
+
+            // Copy pixels to DRM buffer with 90° rotation
+            // Painter: 2008 wide x 60 tall (user view)
+            // DRM: 64 wide (stride) x 2008 tall (physical, rotated)
+            let pixels = painter.pixels();
+            let mut map = drm.map()?;
+            let drm_data = map.as_mut();
+
+            let src_width = DFR_WIDTH as usize;   // 2008
+            let src_height = DFR_HEIGHT as usize; // 60
+            let dst_stride = DFR_STRIDE as usize; // 64
+
+            for src_y in 0..src_height {
+                for src_x in 0..src_width {
+                    // Rotate 90° CCW: user's left→physical top, user's top→physical right
+                    let dst_x = (DFR_HEIGHT - 1) as usize - src_y;
+                    let dst_y = src_x;
+
+                    let src_idx = (src_y * src_width + src_x) * 4;
+                    let dst_idx = (dst_y * dst_stride + dst_x) * 4;
+
+                    if src_idx + 3 < pixels.len() && dst_idx + 3 < drm_data.len() {
+                        drm_data[dst_idx] = pixels[src_idx + 2];     // B
+                        drm_data[dst_idx + 1] = pixels[src_idx + 1]; // G
+                        drm_data[dst_idx + 2] = pixels[src_idx];     // R
+                        drm_data[dst_idx + 3] = pixels[src_idx + 3]; // A
+                    }
+                }
+            }
+            drop(map);
+
+            drm.dirty([ClipRect::new(0, 0, DFR_HEIGHT as u16, DFR_WIDTH as u16)].as_slice())?;
+            needs_redraw = false;
+        }
+
+        // Update backlight
         backlight.update_backlight(&cfg);
+
+        // Wait for events with timeout
+        match epoll.wait(&mut [EpollEvent::new(EpollFlags::EPOLLIN, 0)], next_timeout_ms as isize) {
+            Err(Errno::EINTR) | Ok(_) => { }
+            e => { e?; }
+        };
     }
+}
+
+/// Check if a touch at (x, y) hits button at index btn_idx
+fn button_hit(num_buttons: usize, btn_idx: usize, x: f64, y: f64) -> bool {
+    let button_width = (DFR_WIDTH - (BUTTON_SPACING_PX * (num_buttons - 1) as i32)) as f64 / num_buttons as f64;
+    let left_edge = btn_idx as f64 * (button_width + BUTTON_SPACING_PX as f64);
+    if x < left_edge || x > (left_edge + button_width) {
+        return false
+    }
+    y > 0.1 * DFR_HEIGHT as f64 && y < 0.9 * DFR_HEIGHT as f64
+}
+
+/// Render a function layer using egui
+fn render_function_layer(ctx: &Context, layer: &FunctionLayer, cfg: &Config, pixel_shift: (f64, f64)) {
+    CentralPanel::default()
+        .frame(Frame::none().fill(Color32::BLACK))
+        .show(ctx, |ui| {
+            let available_width = ui.available_width();
+            let available_height = ui.available_height();
+            let num_buttons = layer.buttons.len();
+            let pixel_shift_width = if cfg.enable_pixel_shift { PIXEL_SHIFT_WIDTH_PX as f32 } else { 0.0 };
+            let total_spacing = BUTTON_SPACING_PX as f32 * (num_buttons - 1) as f32;
+            let button_width = (available_width - pixel_shift_width - total_spacing) / num_buttons as f32;
+            let button_height = available_height * 0.7;
+            let button_y = (available_height - button_height) / 2.0 + pixel_shift.1 as f32;
+
+            let (px_shift_x, _px_shift_y) = pixel_shift;
+            let start_x = (pixel_shift_width / 2.0) + px_shift_x as f32;
+
+            for (i, button) in layer.buttons.iter().enumerate() {
+                let button_x = start_x + i as f32 * (button_width + BUTTON_SPACING_PX as f32);
+                let rect = Rect::from_min_size(
+                    Pos2::new(button_x, button_y),
+                    Vec2::new(button_width, button_height),
+                );
+
+                // Determine button color
+                let bg_color = if button.active {
+                    button.background_active
+                } else if cfg.show_button_outlines {
+                    button.background
+                } else {
+                    Color32::BLACK
+                };
+
+                // Draw rounded rectangle background
+                ui.painter().rect_filled(rect, button.corner_radius, bg_color);
+
+                // Draw text (custom fonts are added to Proportional family)
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    &button.text,
+                    FontId::new(button.font_size, FontFamily::Proportional),
+                    button.foreground,
+                );
+            }
+        });
 }

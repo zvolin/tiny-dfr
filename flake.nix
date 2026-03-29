@@ -1,7 +1,7 @@
 {
   description = "The most basic dynamic function row daemon possible";
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-23.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
   outputs = { self, nixpkgs }:
     let
@@ -19,14 +19,8 @@
           pkgs.pkg-config
         ];
         buildInputs = [
-          pkgs.cairo
+          pkgs.systemd
           pkgs.libinput
-          pkgs.freetype
-          pkgs.fontconfig
-          pkgs.glib
-          pkgs.pango
-          pkgs.gdk-pixbuf
-          pkgs.libxml2
         ];
       };
       devShells.aarch64-linux.default = pkgs.mkShell {
@@ -34,7 +28,7 @@
           packages.aarch64-linux.default
         ];
         packages = [
-	  pkgs.rustfmt
+          pkgs.rustfmt
           pkgs.rust-analyzer
         ];
         RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
