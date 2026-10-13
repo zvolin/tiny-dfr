@@ -62,7 +62,7 @@ impl Default for Button {
             corner_radius: 8.0,
             width: Dimension::default(),       // auto-distribute
             height: Dimension::Percent(0.92), // 92% of bar height
-            margin: 16.0,
+            margin: 12.0,
             border_width: 0.0,
             border_color: Color32::TRANSPARENT,
         }
